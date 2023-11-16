@@ -101,3 +101,21 @@ def mkdir(path):
     """
     if not os.path.exists(path):
         os.makedirs(path)
+
+
+def gamma(inputs):
+    # gamma function
+    outputs = torch.exp(torch.lgamma(inputs))
+    return outputs
+
+def cal_aleatoric_uncertainty(alpha1,alpha2,beta):
+    # variance of asymmetric generalized gaussian distribution
+    # alpha1: negative scale parameter
+    # alpha2: positive scale parameter
+    # beta: shape parameter
+    # return: variance
+
+    var1 = alpha1**2 * gamma(3/beta) / gamma(1/beta)
+    var2 = alpha2**2 * gamma(3/beta) / gamma(1/beta)
+    var = ( ( torch.sqrt(var1) + torch.sqrt(var2) ) / 2 ) **2
+    return var
