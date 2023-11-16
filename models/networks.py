@@ -149,6 +149,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
 
     if netG == 'resnet_9blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
+    elif netG == 'ua_resnet_9blocks':
+        net = UAResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
     elif netG == 'resnet_6blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
     elif netG == 'unet_128':
@@ -207,6 +209,92 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal'
 ##############################################################################
 # Classes
 ##############################################################################
+class UncertaintyLoss(nn.Module):
+    def __init__(self, reduction='mean'):
+        super(UncertaintyLoss, self).__init__()
+        self.reduce = reduction
+
+    def __call__(self, predict, alpha1, alpha2, beta, gt):
+        '''
+        Uncertainty loss based on asymmetric generalized Gaussian distribution (Subbotin distribution)
+        predict: predicted image
+        alpha1: scale parameter on negative residue
+        alpha2: scale parameter on positive residue
+        beta: shape parameter
+        alpha1, alpha2, beta are all positive and single channel
+        '''
+
+        if predict.shape != gt.shape:
+            if predict.shape[1] < gt.shape[1]:
+                predict = predict.repeat(1, gt.shape[1] // predict.shape[1], 1, 1)
+            elif predict.shape[1] > gt.shape[1]:
+                gt = gt.repeat(1, predict.shape[1] // gt.shape[1], 1, 1)
+
+        # alpha1 += 1e-1
+        # alpha2 += 1e-1
+        # beta += 1e-1
+        alpha1 = alpha1.clamp(min=3e-1,max=1e1)
+        alpha2 = alpha2.clamp(min=3e-1,max=1e1)
+        beta = beta.clamp(min=3e-1,max=1e1)
+        # calculate residue
+        residue = torch.abs(predict - gt).clamp(min=1e-8,max=1e2)
+        # separate negative and positive residue
+        mask_n = (predict - gt) < 0
+        mask_p = (predict - gt) >= 0
+
+        # calculate negative log likelihood loss
+        # loss1 = torch.log(alpha1 + alpha2 + 1)
+        # loss2 = -torch.log(beta + 1)
+        loss1 = torch.log(alpha1 + alpha2) + torch.log(torch.tensor(2.)) # 2 is a distribution normalization factor
+        loss2 = -torch.log(beta)
+        loss3 = torch.lgamma(1 / beta)
+        # loss_n1 = torch.log( torch.pow((residue / alpha1),beta) + 1)
+        # loss_p1 = torch.log( torch.pow((residue / alpha2),beta) + 1)
+        loss_n1 = (residue / alpha1).pow(beta)
+        loss_p1 = (residue / alpha2).pow(beta)
+        
+        loss_n = ( (loss1 + loss2 + loss3 + loss_n1) * mask_n.float()) 
+        loss_p = ( (loss1 + loss2 + loss3 + loss_p1) * mask_p.float())
+
+        # f_n = beta / (alpha1 + alpha2) / torch.exp(torch.lgamma(1/beta)) * torch.exp( -torch.pow(residue / alpha1, beta) )
+        # f_p = beta / (alpha1 + alpha2) / torch.exp(torch.lgamma(1/beta)) * torch.exp( -torch.pow(residue / alpha2, beta) )
+        # f = f_n * mask_n.float() + f_p * mask_p.float()
+
+        if self.reduce == 'mean':
+            loss = (loss_n + loss_p).mean() 
+        elif self.reduce == 'sum':
+            loss = (loss_n + loss_p).sum()  
+
+
+        # # debug code
+        # print('  ')
+        # print('alpha', alpha1.min().item(), alpha1.max().item(), alpha2.min().item(), alpha2.max().item() )
+        # print('beta',beta.min().item(), beta.max().item() )
+        # print('Residue', residue.min().item(), residue.max().item() )
+        # print('loss1', loss1.min().item(), loss1.max().item() )
+        # print('loss2', loss2.min().item(), loss2.max().item() )
+        # print('loss3', loss3.min().item(), loss3.max().item() )
+        # print('loss_n1', loss_n1.min().item(), loss_n1.max().item() )
+        # print('loss_p1', loss_p1.min().item(), loss_p1.max().item() )
+        # print('loss_n', loss_n.min().item(), loss_n.max().item() )
+        # print('loss_p', loss_p.min().item(), loss_p.max().item() )
+        # print('f', f.min().item(), f.max().item() )
+        # print('Loss', loss.item() )
+        # print('  ')
+
+        if torch.sum(loss1 != loss1) > 0:
+            # print(alpha1.min().item(), alpha1.max().item(), alpha2.min().item(), alpha2.max().item() )
+            raise ValueError('torch.log(alpha1 + alpha2) has nan')
+        if torch.sum(loss3 != loss3) > 0:
+            # print(loss3.min().item(), loss3.max().item())
+            raise ValueError('lgamma_beta has nan')
+        if torch.sum(loss2 != loss2) > 0:
+            # print(beta.min().item(), beta.max().item() )
+            raise ValueError('log_beta has nan')
+
+        return loss
+
+
 class GANLoss(nn.Module):
     """Define different GAN objectives.
 
@@ -614,3 +702,87 @@ class PixelDiscriminator(nn.Module):
     def forward(self, input):
         """Standard forward."""
         return self.net(input)
+
+class UAResnetGenerator(nn.Module):
+    """Resnet-based generator that consists of Resnet blocks between a few downsampling/upsampling operations.
+
+    We adapt Torch code and idea from Justin Johnson's neural style transfer project(https://github.com/jcjohnson/fast-neural-style)
+
+    Modification with 3-head (Haowen Zhou)
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect'):
+        """Construct a Resnet-based generator with uncertainty quantification
+
+        Parameters:
+            input_nc (int)      -- the number of channels in input images
+            output_nc (int)     -- the number of channels in output images
+            ngf (int)           -- the number of filters in the last conv layer
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers
+            n_blocks (int)      -- the number of ResNet blocks
+            padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
+        """
+        assert(n_blocks >= 0)
+        super(UAResnetGenerator, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):       # add ResNet blocks
+
+            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        # model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        # model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+        self.image = nn.Sequential(
+            nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0),
+            nn.Tanh()
+        )
+        self.alpha1 = nn.Sequential(
+            nn.Conv2d(ngf, 1, kernel_size=7, padding=0),
+            nn.Softplus()
+        )
+        self.alpha2 = nn.Sequential(
+            nn.Conv2d(ngf, 1, kernel_size=7, padding=0),
+            nn.Softplus()
+        )
+        self.beta = nn.Sequential(
+            nn.Conv2d(ngf, 1, kernel_size=7, padding=0),
+            nn.Softplus()
+        )
+
+    def forward(self, input):
+        out = self.model(input)
+        y_ = self.image(out)
+        y_alpha1 = self.alpha1(out)
+        y_alpha2 = self.alpha2(out)
+        y_beta = self.beta(out)
+
+        return y_, y_alpha1, y_alpha2, y_beta 
