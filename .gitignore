@@ -1,5 +1,6 @@
 .DS_Store
 debug*
+model_init/
 datasets/
 datasets/maps
 checkpoints/
