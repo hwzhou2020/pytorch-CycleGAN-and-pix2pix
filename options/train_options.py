@@ -35,6 +35,10 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--pool_size', type=int, default=50, help='the size of image buffer that stores previously generated images')
         parser.add_argument('--lr_policy', type=str, default='linear', help='learning rate policy. [linear | step | plateau | cosine]')
         parser.add_argument('--lr_decay_iters', type=int, default=50, help='multiply by a gamma every lr_decay_iters iterations')
+        # pretrain
+        parser.add_argument('--load_pretrain', action='store_true', help='pretrain the model')
+        parser.add_argument('--pretrain_path', type=str, default='model_init', help='pretrain model path')
+        parser.add_argument('--freeze', action='store_true',help='freeze the models except for alpha1, alpha2, and beta layers')
 
         self.isTrain = True
         return parser
