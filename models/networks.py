@@ -214,7 +214,7 @@ class UncertaintyLoss(nn.Module):
         super(UncertaintyLoss, self).__init__()
         self.reduce = reduction
 
-    def __call__(self, predict, alpha1, alpha2, beta, gt):
+    def __call__(self, predict, alpha1, alpha2, beta, gt, up_bound=1e1, low_bound=1e-1, aggd_max=2.):
         '''
         Uncertainty loss based on asymmetric generalized Gaussian distribution (Subbotin distribution)
         predict: predicted image
@@ -230,12 +230,11 @@ class UncertaintyLoss(nn.Module):
             elif predict.shape[1] > gt.shape[1]:
                 gt = gt.repeat(1, predict.shape[1] // gt.shape[1], 1, 1)
 
-        # alpha1 += 1e-1
-        # alpha2 += 1e-1
-        # beta += 1e-1
-        alpha1 = alpha1.clamp(min=3e-1,max=1e1)
-        alpha2 = alpha2.clamp(min=3e-1,max=1e1)
-        beta = beta.clamp(min=3e-1,max=1e1)
+        upper_bound = up_bound
+        lower_bound = low_bound
+        alpha1 = alpha1.clamp(min=lower_bound,max=upper_bound)
+        alpha2 = alpha2.clamp(min=lower_bound,max=upper_bound)
+        beta = beta.clamp(min=lower_bound,max=upper_bound)
         # calculate residue
         residue = torch.abs(predict - gt).clamp(min=1e-8,max=1e2)
         # separate negative and positive residue
@@ -243,13 +242,9 @@ class UncertaintyLoss(nn.Module):
         mask_p = (predict - gt) >= 0
 
         # calculate negative log likelihood loss
-        # loss1 = torch.log(alpha1 + alpha2 + 1)
-        # loss2 = -torch.log(beta + 1)
-        loss1 = torch.log(alpha1 + alpha2) + torch.log(torch.tensor(2.)) # 2 is a distribution normalization factor
+        loss1 = torch.log(alpha1 + alpha2) + torch.log(aggd_max+1.) # aggd_max is a distribution normalization factor
         loss2 = -torch.log(beta)
         loss3 = torch.lgamma(1 / beta)
-        # loss_n1 = torch.log( torch.pow((residue / alpha1),beta) + 1)
-        # loss_p1 = torch.log( torch.pow((residue / alpha2),beta) + 1)
         loss_n1 = (residue / alpha1).pow(beta)
         loss_p1 = (residue / alpha2).pow(beta)
         
@@ -525,7 +520,7 @@ class ResnetBlock(nn.Module):
 class UnetGenerator(nn.Module):
     """Create a Unet-based generator"""
 
-    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False):
+    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=True):
         """Construct a Unet generator
         Parameters:
             input_nc (int)  -- the number of channels in input images

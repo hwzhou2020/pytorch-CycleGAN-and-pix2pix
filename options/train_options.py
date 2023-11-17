@@ -35,10 +35,15 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--pool_size', type=int, default=50, help='the size of image buffer that stores previously generated images')
         parser.add_argument('--lr_policy', type=str, default='linear', help='learning rate policy. [linear | step | plateau | cosine]')
         parser.add_argument('--lr_decay_iters', type=int, default=50, help='multiply by a gamma every lr_decay_iters iterations')
-        # pretrain
+        # pretrain and uncertainty parameters
         parser.add_argument('--load_pretrain', action='store_true', help='pretrain the model')
         parser.add_argument('--pretrain_path', type=str, default='model_init', help='pretrain model path')
         parser.add_argument('--freeze', action='store_true',help='freeze the models except for alpha1, alpha2, and beta layers')
+        parser.add_argument('--mc_dropout', action='store_true',help='use mc dropout')
+        parser.add_argument('--mc_dropout_mode', type=str, default='constant', help='mc dropout modes: [constant | random], random is not written yet')
+        parser.add_argument('--mc_dropout_rate', type=float, default=0.4, help='mc dropout rate')
+        parser.add_argument('--up_bound', type=float, default=1e1, help='Upper bound of alpha1, alpha2, and beta')
+        parser.add_argument('--low_bound', type=float, default=1e-1, help='Lower bound of alpha1, alpha2, and beta')
 
         self.isTrain = True
         return parser

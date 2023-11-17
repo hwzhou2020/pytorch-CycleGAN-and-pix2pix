@@ -108,7 +108,7 @@ def gamma(inputs):
     outputs = torch.exp(torch.lgamma(inputs))
     return outputs
 
-def cal_aleatoric_uncertainty(alpha1,alpha2,beta):
+def cal_raw_uncertainty(alpha1,alpha2,beta):
     # variance of asymmetric generalized gaussian distribution
     # alpha1: negative scale parameter
     # alpha2: positive scale parameter
@@ -117,5 +117,51 @@ def cal_aleatoric_uncertainty(alpha1,alpha2,beta):
 
     var1 = alpha1**2 * gamma(3/beta) / gamma(1/beta)
     var2 = alpha2**2 * gamma(3/beta) / gamma(1/beta)
-    var = ( ( torch.sqrt(var1) + torch.sqrt(var2) ) / 2 ) **2
-    return var
+    std = ( ( torch.sqrt(var1) + torch.sqrt(var2) ) / 2 ) 
+
+
+    return torch.log10(std+1)
+
+def AGGD_bound(alpha1,alpha2,beta):
+    # Asymmetric generalized gaussian distribution
+    residue = 0
+    f_n = beta / (alpha1 + alpha2) / torch.exp(torch.lgamma(1/beta)) * torch.exp( -torch.pow(residue / alpha1, beta) )
+    f_p = beta / (alpha1 + alpha2) / torch.exp(torch.lgamma(1/beta)) * torch.exp( -torch.pow(residue / alpha2, beta) )
+    f = (f_n * (f_n > f_p) + f_p * (f_n <= f_p)) 
+    return torch.max(f)
+
+
+def cal_ua_range(up_bound,low_bound):
+    # calculate the range of uncertainty-aware loss
+    # up_bound: upper bound of alpha1, alpha2, and beta
+    # low_bound: lower bound of alpha1, alpha2, and beta
+    
+    # calculate 8 possible combinations of alpha1, alpha2, and beta
+    range_ua_list = torch.zeros(2**3)
+    aggd_list = torch.zeros(2**3)
+    bound_range = [torch.tensor(up_bound),torch.tensor(low_bound)]
+    list_choice = ([0,0,0],[0,0,1],[0,1,0],[0,1,1],[1,0,0],[1,0,1],[1,1,0],[1,1,1])
+    for i,j,k in list_choice:
+        range_ua_list[i*2**2 + j*2 + k] = cal_raw_uncertainty(bound_range[i],bound_range[j],bound_range[k]) 
+        aggd_list[i*2**2 + j*2 + k] = AGGD_bound(bound_range[i],bound_range[j],bound_range[k])
+    
+    # find the minimum and maximum of the 8 possible combinations
+    ua_range = [torch.max(range_ua_list)-4,torch.min(range_ua_list)]   # clamp by 1e4 #######################################
+    aggd_max = torch.max(aggd_list)
+
+    # ua_range_arg = [torch.argmax(range_ua_list),torch.argmin(range_ua_list)]
+    # print('ua_range_arg: ',ua_range_arg)
+    print('Uncertainty_range: ',ua_range[0].item(),ua_range[1].item())
+    # print('ua_range_list: ',range_ua_list)
+    print('AGGD_max: ',aggd_max.item())
+
+    return ua_range, aggd_max
+
+
+def cal_uncertainty(alpha1,alpha2,beta,ua_range):
+    
+    std = cal_raw_uncertainty(alpha1,alpha2,beta)
+    # normalize uncertainty
+    std = (std - ua_range[1]) / (ua_range[0] - ua_range[1]) 
+
+    return std.clamp(0,1)
